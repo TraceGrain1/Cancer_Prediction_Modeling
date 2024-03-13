@@ -1,0 +1,2508 @@
+---
+title: "HW4: Cancer Predictions Using Machine Learning Techniques"
+author: "Cryptovoyant"
+date: '2022-12-13'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = TRUE)
+```
+
+
+```{r Load-And-Install-Packages, include=FALSE}
+# Load and Install Packages
+options(scipen = 999)
+
+# Set Working Directory
+setwd("~/School/University of Michigan/2022 Fall B/TO 628/Individual Project")
+
+# Packages
+packages <-  c("ggplot2", "plotly", "dplyr", "tidyverse", "scales", "caret", "kableExtra", "moments", "stringr", "class", "neuralnet", "janitor", "MASS", "tree", "randomForest", "C50", "nnet")
+
+## Checks to see if any packages listed are not installed
+for(i in 1:length(packages)){
+  if(!(packages[i] %in% as.character(installed.packages()[,1]))){
+    install.packages(packages[i])
+  }
+}
+
+# Load Libraries here
+library(ggplot2)
+library(plotly)
+library(dplyr)
+library(tidyverse)
+library(scales)
+library(caret)
+library(kableExtra)
+library(moments)
+library(stringr)
+library(class)
+library(neuralnet)
+library(janitor)
+library(tree)
+library(randomForest)
+library(C50)
+library(nnet)
+
+```
+
+
+```{r Define-Global-Functions, include=FALSE}
+# Define Global Functions
+thresh_function <- function(thresh, predictions, test_data_vector){
+  predvalue <- ifelse(predictions >= thresh, "M", "B")
+  cm <- confusionMatrix(as.factor(predvalue), as.factor(test_data_vector), positive = "M")
+  kappa <- cm$overall["Kappa"]
+  sensitivity <- cm$byClass["Sensitivity"]
+  specificity <- cm$byClass["Specificity"]
+  metrics <- c(kappa, sensitivity, specificity)
+  return(metrics)
+}
+
+```
+
+```{r Master-Parameters}
+error_cost <- matrix(c(0.0, 1.0, 3.5, 0.0), nrow = 2) # Global Error Cost Matrix 
+row.names(error_cost) <- c("B", "M")
+colnames(error_cost) <- c("B", "M")
+error_cost
+
+target_log <- 0.95 # Search sensitivity or specificity percentage finder
+target_knn <- 0.95 # Search sensitivity or specificity percentage finder
+target_ann <- 0.95 # Search sensitivity or specificity percentage finder
+target_rf <- 0.95 # Search sensitivity or specificity percentage finder
+
+global_cv_folds <- 5 # Number of folds for training methods
+
+global_trials <- c(1, 3)
+
+data_sub_size1 <- 0.5
+
+data_sub_size2 <- 0.65
+
+thresh_search <- seq(0.2, 0.8 , 0.01)
+
+global_winnow <- "FALSE"
+```
+
+
+## Executive Summary
+
+- Madison General Hospital ("MadGen" or "the Company") can leverage machine learning techniques to decrease the misdiagnosis rate of its radiologists on staff
+- My recommendation is that the Company should use data and machine learning to create a diagnosis system process to minimize human error risk in its hospital
+
+### MadGen Machine Learning Workflow
+
+- Set target assumptions (error cost matrix, sensitivity search finder, specificity search finder, thresh hold search range, etc.)
+- Divide Data into Final Hold Out, Base Level Train, and Base Level Test
+- Create individual base level models on Base Level Train data using several machine learning techniques (Logistic Regression, KNN, ANN and Random Forest)
+- Within each algorithm group (Logistic Regression, KNN, ANN and Random Forest) create multiple models optimizing objective function metrics (Kappa, Accuracy, Sensitivity, Specificity) and output the models
+- Create predictions using the multiple models within each algorithm group on the base level test data
+- Create predictions data frame (decision tree train data set) of the predictions within each algorithm group
+- Train and optimize a decision tree to select the best model method within each algorithm group
+- Create predictions from each individual algorithm group model selector and combine into master decision tree train data set
+- Train Master Tree selector model
+- Move up a layer to Final Hold Out Sample
+- Create predictions within algorithm group, optimize objective functions (Kappa, Accuracy, Sensitivity, Specificity), finalize predictions through user defined thresholds, combine predictions within algorithm group, create predictions from algorithm group decision tree selector, combined predicitions from different algorithm groups into master data frame and use master tree selector model for predictions
+- Inspect results
+
+## Outcome
+
+Through the above Machine Learning Workflow we find that the Company can achieve ~90% overall accuracy (89.12%) and a misdiagnosis rate of 4.35% (predicting Benign when in fact Malignant). Although the results of the machine learning process meet the specifications the MadGen management team hired us for, our overall recommendation is to use algorithmic prediction of cancer diagnosis in addition to human diagnosis to minimize overall error rate. Algorithmic prediction can be subject to proxy bias, legacy bias and sampling bias. A business, especially one that is involved with healthcare, cannot be overexposed to risks introduced by these biases. It is important to understand that using algorithmic prediction can be helpful but cannot replace human judgement (At least not yet, let's see what OpenAI does over the next 5 - 10 years)
+
+
+## Note
+If I split the data up into an 80:20 split on both levels you achieve 91.23% overall accuracy and a misdiagnosis rate of 2.27% (predicting Benign when in fact Malignant). 
+
+Assumptions for 91.23% accuracy and 2.27% misdiagnosis rate
+
+- error_cost          matrix(c(0.0, 1.0, 3, 0.0), nrow = 2)
+- target_log          0.925 
+- target_knn          0.925
+- target_ann          0.925
+- target_rf           0.925 
+- global_cv_folds     5 
+- global_trials       c(1,3,4,5,6,7,8,9,10,11,12,13,14,15)
+- data_sub_size1      0.8
+- data_sub_size2      0.8
+- thresh_search       seq(0.2, 0.8 , 0.01)
+- global_winnow       "FALSE"
+
+
+
+## Load, Inspect and Clean Data
+```{r Load-Inspect-Clean-Data, include=FALSE}
+cancer_data <- read.csv("wisc.csv")
+
+head(cancer_data, 10)
+
+str(cancer_data)
+
+summary(cancer_data)
+
+# Remove id
+cancer_data$id <- NULL
+
+# Factorize Diagnosis
+cancer_data$diagnosis <- factor(cancer_data$diagnosis, levels =  c("B", "M"))
+
+```
+
+# Create Train and Test Sets
+```{r Partition-Data}
+# Set Random Seed
+set.seed(23)
+
+# Shuffle Data Twice
+data_shuffle <- sample(1:nrow(cancer_data), nrow(cancer_data))
+
+cancer_data <- cancer_data[data_shuffle,]
+
+data_shuffle <- sample(1:nrow(cancer_data), nrow(cancer_data))
+
+cancer_data <- cancer_data[data_shuffle,]
+# Partition Data
+# Size parameter
+
+
+# Create subset train and test subset
+train <- sample(1:nrow(cancer_data), round(data_sub_size1*nrow(cancer_data)))
+
+# Log Regression Data Partitioning
+# Model sample data set
+model_sample <- cancer_data[train,]
+
+# Final Hold Out Sample
+final_hold_out <- cancer_data[-train,]
+
+final_hold_out_dummy <- as.data.frame(model.matrix(~. -1, data = final_hold_out))
+
+final_hold_out_dummy$diagnosisB <- NULL
+
+final_hold_out_dummy$diagnosis <- final_hold_out_dummy$diagnosisM
+
+final_hold_out_dummy$diagnosisM <- NULL
+
+final_hold_out_norm <- as.data.frame(scale(final_hold_out_dummy[,-which(colnames(final_hold_out_dummy) == "diagnosis")]))
+
+final_hold_out_norm$diagnosis <- as.factor(ifelse(final_hold_out_dummy$diagnosis == 1, "M", "B"))
+
+final_hold_out_norm <- clean_names(final_hold_out_norm)
+
+final_hold_out_knn <- final_hold_out_norm
+
+final_hold_out_ann <- final_hold_out_norm
+
+final_hold_out_rf <- final_hold_out_norm
+
+
+
+
+train_train <- sample(1:nrow(model_sample), round(data_sub_size2*nrow(model_sample)))
+
+base_level_train <- model_sample[train_train,]
+
+base_level_test <- model_sample[-train_train,]
+
+# KNN & ANN Data Preparation
+model_sample_dummy <- as.data.frame(model.matrix(~. -1, data = model_sample))
+
+model_sample_dummy$diagnosisB <- NULL
+
+model_sample_dummy$diagnosis <- model_sample_dummy$diagnosisM
+
+model_sample_dummy$diagnosisM <- NULL
+
+model_sample_norm <- as.data.frame(scale(model_sample_dummy[,-which(colnames(model_sample_dummy) == "diagnosis")]))
+
+model_sample_norm$diagnosis <- as.factor(ifelse(model_sample_dummy$diagnosis == 1, "M", "B"))
+
+model_sample_norm <- clean_names(model_sample_norm)
+
+# Create Train and Test set for KNN
+base_level_train_knn <- model_sample_norm[train_train,]
+
+base_level_test_knn <- model_sample_norm[-train_train,]
+
+# Create Train and Test set for ANN
+base_level_train_ann <- model_sample_norm[train_train,]
+
+base_level_test_ann <- model_sample_norm[-train_train,]
+
+# Create Train and Test set for Random Forest
+base_level_train_rf <- model_sample_norm[train_train,]
+
+base_level_test_rf <- model_sample_norm[-train_train,]
+
+
+```
+
+# Logistic Regression
+```{r Logistic-Regression, results='hide'}
+base_level_train_upsampled <- upSample(x = base_level_train[,-ncol(base_level_train)], y = base_level_train$diagnosis) 
+base_level_train_upsampled$diagnosis <- base_level_train_upsampled$Class
+
+base_level_train_upsampled$Class <- NULL
+
+# Create Base Log Model with all data
+base_log_model <- glm(diagnosis~., data = base_level_train_upsampled, family = "binomial")
+
+# Inspect the model
+summary(base_log_model)
+
+# Find "Best Model" using backward step wise variable selection
+best_backward_log_model <- step(base_log_model, direction = "backward", trace = FALSE)
+
+# Inspect the model
+summary(best_backward_log_model)
+
+# Find "Best Model" using forward step wise variable selection
+best_forward_log_model <- step(base_log_model, direction = "forward", trace = FALSE)
+
+# Inspect the model
+summary(best_forward_log_model)
+```
+
+# Create Predictions
+```{r Create-Log-Model-Prediction-Response}
+# Create Predictions
+base_log_pred <- predict(base_log_model, newdata = base_level_test, type = "response")
+best_backward_log_pred <- predict(best_backward_log_model, newdata = base_level_test, type = "response")
+best_forward_log_pred <- predict(best_forward_log_model, newdata = base_level_test, type = "response")
+```
+
+
+# Optimize Prediction Threshold  {.tabset}
+## Base Log Regression Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Base-Log, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_log_pred, base_level_test$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_log_pred, base_level_test$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+
+lookup <- which(abs(output$Sensitivity-target_log)==min(abs(output$Sensitivity-target_log)))[1]
+base_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_log)==min(abs(output$Specificity-target_log)))[1]
+base_opt_specificity_thresh <- thresh_search[lookup]
+
+```
+
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Best Backwards Stepwise Log Regression Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Backwards-Log, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, best_backward_log_pred, base_level_test$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, best_backward_log_pred, base_level_test$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+backward_search_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_log)==min(abs(output$Sensitivity-target_log)))[1]
+backward_search_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_log)==min(abs(output$Specificity-target_log)))[1]
+backward_search_opt_specificity_thresh <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Best Forward Stepwise Log Regression Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Forward-Log, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, best_forward_log_pred, base_level_test$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, best_forward_log_pred, base_level_test$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+forward_search_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_log)==min(abs(output$Sensitivity-target_log)))[1]
+forward_search_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_log)==min(abs(output$Specificity-target_log)))[1]
+forward_search_opt_specificity_thresh <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+# Create Base level Test Predictions Output for the Log Regression Methods
+```{r Base-Level-Decision-Tree-Selector-Train, include=FALSE}
+base_log_best_kappa_pred_value  <- ifelse(base_log_pred >= base_opt_kappa_thresh, "M", "B")
+base_log_best_sensitivity_pred_value  <- ifelse(base_log_pred >= base_opt_sensitivity_thresh, "M", "B")
+base_log_best_specificity_pred_value  <- ifelse(base_log_pred >= base_opt_specificity_thresh, "M", "B")
+best_backward_log_best_kappa_pred_value  <- ifelse(best_backward_log_pred >= backward_search_opt_kappa_thresh, "M", "B")
+best_backward_log_best_sensitivity_pred_value  <- ifelse(best_backward_log_pred >= backward_search_opt_sensitivity_thresh, "M", "B")
+best_backward_log_best_specificity_pred_value  <- ifelse(best_backward_log_pred >= backward_search_opt_specificity_thresh, "M", "B")
+best_forward_log_best_kappa_pred_value  <- ifelse(best_forward_log_pred >= forward_search_opt_kappa_thresh, "M", "B")
+best_forward_log_best_sensitivity_pred_value  <- ifelse(best_forward_log_pred >= forward_search_opt_sensitivity_thresh, "M", "B")
+best_forward_log_best_specificity_pred_value  <- ifelse(best_forward_log_pred >= forward_search_opt_specificity_thresh, "M", "B")
+
+decision_tree_train_log_model_output <- cbind.data.frame(base_log_best_kappa_pred_value, base_log_best_sensitivity_pred_value, base_log_best_specificity_pred_value,
+                                                         best_backward_log_best_kappa_pred_value, best_backward_log_best_sensitivity_pred_value, best_backward_log_best_specificity_pred_value,
+                                                         best_forward_log_best_kappa_pred_value, best_forward_log_best_sensitivity_pred_value, best_forward_log_best_specificity_pred_value,
+                                                         base_level_test$diagnosis)
+
+names(decision_tree_train_log_model_output) <- c("Base_Log_Kappa", "Base_Log_Sensitivity", "Base_Log_Specificity", 
+                                                 "Backward_Log_Kappa", "Backward_Log_Sensitivity",  "Backward_Log_Specificity", 
+                                                 "Forward_Log_Kappa", "Forward_Log_Sensitivity", "Forward_Log_Specificity",
+                                                 "Actual")
+
+decision_tree_train_log_model_output$Base_Log_Kappa <- as.factor(decision_tree_train_log_model_output$Base_Log_Kappa)
+
+decision_tree_train_log_model_output$Base_Log_Sensitivity <- as.factor(decision_tree_train_log_model_output$Base_Log_Sensitivity)
+
+decision_tree_train_log_model_output$Base_Log_Specificity <- as.factor(decision_tree_train_log_model_output$Base_Log_Specificity)
+
+decision_tree_train_log_model_output$Backward_Log_Kappa <- as.factor(decision_tree_train_log_model_output$Backward_Log_Kappa)
+
+decision_tree_train_log_model_output$Backward_Log_Sensitivity <- as.factor(decision_tree_train_log_model_output$Backward_Log_Sensitivity)
+
+decision_tree_train_log_model_output$Backward_Log_Specificity <- as.factor(decision_tree_train_log_model_output$Backward_Log_Specificity)
+
+decision_tree_train_log_model_output$Forward_Log_Kappa <- as.factor(decision_tree_train_log_model_output$Forward_Log_Kappa)
+
+decision_tree_train_log_model_output$Forward_Log_Sensitivity <- as.factor(decision_tree_train_log_model_output$Forward_Log_Sensitivity)
+
+decision_tree_train_log_model_output$Forward_Log_Specificity <- as.factor(decision_tree_train_log_model_output$Forward_Log_Specificity)
+
+decision_tree_train_log_model_output$Actual <- as.factor(decision_tree_train_log_model_output$Actual)
+```
+
+```{r}
+head(decision_tree_train_log_model_output, 8)
+```
+
+# Analyze Individual Model Results {.tabset}
+
+## Base Log Highest Kappa Model
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Base_Log_Kappa, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Base Log: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Base_Log_Sensitivity, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Base Log: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Base_Log_Specificity, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Backwards Log: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Backward_Log_Kappa, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Backwards Log: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Backward_Log_Sensitivity, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Backwards Log: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Backward_Log_Specificity, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Forward Log: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Forward_Log_Kappa, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Forward Log: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Forward_Log_Sensitivity, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Forward Log: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_log_model_output$Forward_Log_Specificity, decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+# Train Decision Tree
+```{r, include=FALSE}
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_best_tree_log_model_selector <- train(Actual ~ ., data = decision_tree_train_log_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+
+base_best_model <- base_best_tree_log_model_selector$bestTune$model
+base_best_trials <- base_best_tree_log_model_selector$bestTune$trials
+base_best_winnow <- base_best_tree_log_model_selector$bestTune$winnow
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_oneSE_tree_log_model_selector <- train(Actual ~ ., data = decision_tree_train_log_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_oneSE_model <- base_oneSE_tree_log_model_selector$bestTune$model
+base_oneSE_trials <- base_oneSE_tree_log_model_selector$bestTune$trials
+base_oneSE_winnow <- base_oneSE_tree_log_model_selector$bestTune$winnow
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_tolerance_tree_log_model_selector <- train(Actual ~ ., data = decision_tree_train_log_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_tolerance_model <- base_tolerance_tree_log_model_selector$bestTune$model
+base_tolerance_trials <- base_tolerance_tree_log_model_selector$bestTune$trials
+base_tolerance_winnow <- base_tolerance_tree_log_model_selector$bestTune$winnow
+
+```
+
+# Plot Log Regression Decision Logic
+```{r, include=FALSE}
+base_best_tree_log_model_plotter <- C5.0(Actual~., data = decision_tree_train_log_model_output, cost = error_cost, model = base_best_model, trials = base_best_trials, winnow = base_best_winnow)
+
+base_oneSE_tree_log_model_plotter <- C5.0(Actual~., data = decision_tree_train_log_model_output, cost = error_cost, model = base_oneSE_model, trials = base_oneSE_trials, winnow = base_oneSE_winnow)
+
+base_tolerance_tree_log_model_plotter <- C5.0(Actual~., data = decision_tree_train_log_model_output, cost = error_cost, model = base_tolerance_model, trials = base_tolerance_trials, winnow = base_tolerance_winnow)
+```
+
+```{r, echo=FALSE}
+par(mfrow = c(3,1))
+base_best_tree_log_model_plotter %>% plot(main = "Best Train Method")
+base_oneSE_tree_log_model_plotter %>% plot(main = "oneSE Train Method")
+base_tolerance_tree_log_model_plotter %>% plot(main = "Tolerance Train Method")
+```
+
+
+# Check Base level Tree Results Logistic Regression {.tabset}
+## Best
+```{r}
+base_best_log_tree_pred <-  predict(base_best_tree_log_model_selector, newdata = decision_tree_train_log_model_output, "raw")
+confusionMatrix(as.factor(base_best_log_tree_pred), decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## OneSE
+```{r}
+base_oneSE_log_tree_pred <-  predict(base_oneSE_tree_log_model_selector, newdata = decision_tree_train_log_model_output, "raw")
+confusionMatrix(as.factor(base_oneSE_log_tree_pred), decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+## Tolerance
+```{r}
+base_tolerance_log_tree_pred <-  predict(base_tolerance_tree_log_model_selector, newdata = decision_tree_train_log_model_output, "raw")
+confusionMatrix(as.factor(base_tolerance_log_tree_pred), decision_tree_train_log_model_output$Actual, positive = "M")
+```
+
+
+# KNN
+
+```{r}
+base_level_train_knn_upsampled <- upSample(x = base_level_train_knn[,-ncol(base_level_train_knn)], y = base_level_train_knn$diagnosis) 
+base_level_train_knn_upsampled$diagnosis <- base_level_train_knn_upsampled$Class
+
+base_level_train_knn_upsampled$Class <- NULL
+
+koption <- round(sqrt(nrow(base_level_train_knn_upsampled)),0)
+
+koption
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+grid <- expand.grid(k = seq(2, 100))
+
+set.seed(23)
+base_knn_best <- train(diagnosis~., data = base_level_train_knn_upsampled, method = "knn",
+                       metric = "Kappa",
+                       trControl = ctrl,
+                       tuneGrid = grid)
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+grid <- expand.grid(k = seq(2, 100))
+
+set.seed(23)
+base_knn_oneSE <- train(diagnosis~., data = base_level_train_knn_upsampled, method = "knn",
+                        metric = "Kappa",
+                        trControl = ctrl,
+                        tuneGrid = grid)
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+grid <- expand.grid(k = seq(2, 100))
+
+set.seed(23)
+base_knn_tolerance <- train(diagnosis~., data = base_level_train_knn_upsampled, method = "knn",
+                            metric = "Kappa",
+                            trControl = ctrl,
+                            tuneGrid = grid)
+
+```
+
+# Create Predictions
+```{r Create-KNN-Model-Prediction-Response}
+# Create Predictions
+base_knn_best_pred <- predict(base_knn_best, newdata = base_level_test_knn, type = "prob")[,2]
+base_knn_oneSE_pred <- predict(base_knn_oneSE, newdata = base_level_test_knn, type = "prob")[,2]
+base_knn_tolerance_pred <- predict(base_knn_tolerance, newdata = base_level_test_knn, type = "prob")[,2]
+```
+
+
+# Optimize Prediction Threshold  {.tabset}
+## Base "Best" KNN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Best-KNN, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_knn_best_pred, base_level_test_knn$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_knn_best_pred, base_level_test_knn$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_knn_best_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_knn)==min(abs(output$Sensitivity-target_knn)))[1]
+base_knn_best_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_knn)==min(abs(output$Specificity-target_knn)))[1]
+base_knn_best_opt_specificity_thresh <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Base "oneSE" KNN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-OneSE-KNN, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_knn_oneSE_pred, base_level_test_knn$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_knn_oneSE_pred, base_level_test_knn$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_knn_oneSE_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_knn)==min(abs(output$Sensitivity-target_knn)))[1]
+base_knn_oneSE_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_knn)==min(abs(output$Specificity-target_knn)))[1]
+base_knn_oneSE_opt_specificity_thresh <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Base "Tolerance" KNN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Tolerance-KNN, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_knn_tolerance_pred, base_level_test_knn$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_knn_tolerance_pred, base_level_test_knn$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_knn_tolerance_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_knn)==min(abs(output$Sensitivity-target_knn)))[1]
+base_knn_tolerance_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_knn)==min(abs(output$Specificity-target_knn)))[1]
+base_knn_tolerance_opt_specificity_thresh <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+# Create Base level Test Predictions Output for the KNN Methods
+```{r Base-Level-Decision-Tree-Selector-Train-KNN, include=FALSE}
+base_best_knn_best_kappa_pred_value  <- ifelse(base_knn_best_pred >= base_knn_best_opt_kappa_thresh, "M", "B")
+base_best_knn_best_sensitivity_pred_value  <- ifelse(base_knn_best_pred >= base_knn_best_opt_sensitivity_thresh, "M", "B")
+base_best_knn_best_specificity_pred_value  <- ifelse(base_knn_best_pred >= base_knn_best_opt_specificity_thresh, "M", "B")
+base_knn_oneSE_best_kappa_pred_value  <- ifelse(base_knn_oneSE_pred >= base_knn_oneSE_opt_kappa_thresh, "M", "B")
+base_knn_oneSE_best_sensitivity_pred_value  <- ifelse(base_knn_oneSE_pred >= base_knn_oneSE_opt_sensitivity_thresh, "M", "B")
+base_knn_oneSE_best_specificity_pred_value  <- ifelse(base_knn_oneSE_pred >= base_knn_oneSE_opt_specificity_thresh, "M", "B")
+base_knn_tolerance_best_kappa_pred_value  <- ifelse(base_knn_tolerance_pred >= base_knn_tolerance_opt_kappa_thresh, "M", "B")
+base_knn_tolerance_best_sensitivity_pred_value  <- ifelse(base_knn_tolerance_pred >= base_knn_tolerance_opt_sensitivity_thresh, "M", "B")
+base_knn_tolerance_best_specificity_pred_value  <- ifelse(base_knn_tolerance_pred >= base_knn_tolerance_opt_specificity_thresh, "M", "B")
+
+decision_tree_train_knn_model_output <- cbind.data.frame(base_best_knn_best_kappa_pred_value, base_best_knn_best_sensitivity_pred_value, base_best_knn_best_specificity_pred_value,
+                                                         base_knn_oneSE_best_kappa_pred_value, base_knn_oneSE_best_sensitivity_pred_value, base_knn_oneSE_best_specificity_pred_value,
+                                                         base_knn_tolerance_best_kappa_pred_value, base_knn_tolerance_best_sensitivity_pred_value, base_knn_tolerance_best_specificity_pred_value,
+                                                         base_level_test$diagnosis)
+
+names(decision_tree_train_knn_model_output) <- c("Base_Best_KNN_Kappa", "Base_Best_KNN_Sensitivity", "Base_Best_KNN_Specificity", 
+                                                 "Base_oneSE_KNN_Kappa", "Base_oneSE_KNN_Sensitivity",  "Base_oneSE_KNN_Specificity", 
+                                                 "Base_Tolerance_KNN_Kappa", "Base_Tolerance_KNN_Sensitivity", "Base_Tolerance_KNN_Specificity",
+                                                 "Actual")
+
+decision_tree_train_knn_model_output$Base_Best_KNN_Kappa <- as.factor(decision_tree_train_knn_model_output$Base_Best_KNN_Kappa)
+
+decision_tree_train_knn_model_output$Base_Best_KNN_Sensitivity <- as.factor(decision_tree_train_knn_model_output$Base_Best_KNN_Sensitivity)
+
+decision_tree_train_knn_model_output$Base_Best_KNN_Specificity <- as.factor(decision_tree_train_knn_model_output$Base_Best_KNN_Specificity)
+
+decision_tree_train_knn_model_output$Base_oneSE_KNN_Kappa <- as.factor(decision_tree_train_knn_model_output$Base_oneSE_KNN_Kappa)
+
+decision_tree_train_knn_model_output$Base_oneSE_KNN_Sensitivity <- as.factor(decision_tree_train_knn_model_output$Base_oneSE_KNN_Sensitivity)
+
+decision_tree_train_knn_model_output$Base_oneSE_KNN_Specificity <- as.factor(decision_tree_train_knn_model_output$Base_oneSE_KNN_Specificity)
+
+decision_tree_train_knn_model_output$Base_Tolerance_KNN_Kappa <- as.factor(decision_tree_train_knn_model_output$Base_Tolerance_KNN_Kappa)
+
+decision_tree_train_knn_model_output$Base_Tolerance_KNN_Sensitivity <- as.factor(decision_tree_train_knn_model_output$Base_Tolerance_KNN_Sensitivity)
+
+decision_tree_train_knn_model_output$Base_Tolerance_KNN_Specificity <- as.factor(decision_tree_train_knn_model_output$Base_Tolerance_KNN_Specificity)
+
+decision_tree_train_knn_model_output$Actual <- as.factor(decision_tree_train_knn_model_output$Actual)
+```
+
+```{r}
+head(decision_tree_train_knn_model_output, 8)
+```
+
+
+# Analyze Individual Model Results {.tabset}
+
+## Base Best KNN Highest Kappa Model
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_Best_KNN_Kappa, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base Best KNN: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_Best_KNN_Sensitivity, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base Best KNN: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_Best_KNN_Specificity, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base oneSE KNN: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_oneSE_KNN_Kappa, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base oneSE KNN: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_oneSE_KNN_Sensitivity, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base oneSE KNN: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_oneSE_KNN_Specificity, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance KNN: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_Tolerance_KNN_Kappa, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance KNN: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_Tolerance_KNN_Sensitivity, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance KNN: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_knn_model_output$Base_Tolerance_KNN_Specificity, decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+# Train Decision Tree
+```{r, include=FALSE}
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_best_tree_knn_model_selector <- train(Actual ~ ., data = decision_tree_train_knn_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+
+base_best_model <- base_best_tree_knn_model_selector$bestTune$model
+base_best_trials <- base_best_tree_knn_model_selector$bestTune$trials
+base_best_winnow <- base_best_tree_knn_model_selector$bestTune$winnow
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_oneSE_tree_knn_model_selector <- train(Actual ~ ., data = decision_tree_train_knn_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_oneSE_model <- base_oneSE_tree_knn_model_selector$bestTune$model
+base_oneSE_trials <- base_oneSE_tree_knn_model_selector$bestTune$trials
+base_oneSE_winnow <- base_oneSE_tree_knn_model_selector$bestTune$winnow
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_tolerance_tree_knn_model_selector <- train(Actual ~ ., data = decision_tree_train_knn_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_tolerance_model <- base_tolerance_tree_knn_model_selector$bestTune$model
+base_tolerance_trials <- base_tolerance_tree_knn_model_selector$bestTune$trials
+base_tolerance_winnow <- base_tolerance_tree_knn_model_selector$bestTune$winnow
+```
+
+# Plot KNN Decision Logic
+```{r, include=FALSE}
+base_best_tree_knn_model_plotter <- C5.0(Actual~., data = decision_tree_train_knn_model_output, cost = error_cost, model = base_best_model, trials = base_best_trials, winnow = base_best_winnow)
+
+base_oneSE_tree_knn_model_plotter <- C5.0(Actual~., data = decision_tree_train_knn_model_output, cost = error_cost, model = base_oneSE_model, trials = base_oneSE_trials, winnow = base_oneSE_winnow)
+
+base_tolerance_tree_knn_model_plotter <- C5.0(Actual~., data = decision_tree_train_knn_model_output, cost = error_cost, model = base_tolerance_model, trials = base_tolerance_trials, winnow = base_tolerance_winnow)
+```
+
+```{r, echo=FALSE}
+par(mfrow = c(3,1))
+base_best_tree_knn_model_plotter %>% plot(main = "Best Train Method")
+base_oneSE_tree_knn_model_plotter %>% plot(main = "oneSE Train Method")
+base_tolerance_tree_knn_model_plotter %>% plot(main = "Tolerance Train Method")
+```
+
+# Check Base level Tree Results KNN {.tabset}
+## Best
+```{r}
+base_best_knn_tree_pred <-  predict(base_best_tree_knn_model_selector, newdata = decision_tree_train_knn_model_output, "raw")
+confusionMatrix(as.factor(base_best_knn_tree_pred), decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## OneSE
+```{r}
+base_oneSE_knn_tree_pred <-  predict(base_oneSE_tree_knn_model_selector, newdata = decision_tree_train_knn_model_output, "raw")
+confusionMatrix(as.factor(base_oneSE_knn_tree_pred), decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+## Tolerance
+```{r}
+base_tolerance_knn_tree_pred <-  predict(base_tolerance_tree_knn_model_selector, newdata = decision_tree_train_knn_model_output, "raw")
+confusionMatrix(as.factor(base_tolerance_knn_tree_pred), decision_tree_train_knn_model_output$Actual, positive = "M")
+```
+
+
+# ANN
+```{r, results='hide'}
+base_level_train_ann_upsampled <- upSample(x = base_level_train_ann[,-ncol(base_level_train_ann)], y = base_level_train_ann$diagnosis) 
+base_level_train_ann_upsampled$diagnosis <- base_level_train_ann_upsampled$Class
+
+base_level_train_ann_upsampled$Class <- NULL
+
+size_parameter <- 1:20
+decay_parameter <- 1:5
+
+grid = expand.grid(size = size_parameter,
+                   decay = decay_parameter)
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+set.seed(23)
+base_ann_best <- train(diagnosis~., data = base_level_train_ann_upsampled, method = "nnet", 
+                       tuneGrid = grid,
+                       metric = "Kappa",
+                       trControl = ctrl)
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+
+set.seed(23)
+base_ann_oneSE <- train(diagnosis~., data = base_level_train_ann_upsampled, method = "nnet", 
+                        tuneGrid = grid,
+                        metric = "Kappa",
+                        trControl = ctrl)
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+
+set.seed(23)
+base_ann_tolerance <- train(diagnosis~., data = base_level_train_ann_upsampled, method = "nnet", 
+                            tuneGrid = grid,
+                            metric = "Kappa",
+                            trControl = ctrl)
+```
+
+# Create Predictions
+```{r Create-ANN-Model-Prediction-Response}
+# Create Predictions
+base_ann_best_pred <- predict(base_ann_best, newdata = base_level_test_ann, type = "prob")[,2]
+base_ann_oneSE_pred <- predict(base_ann_oneSE, newdata = base_level_test_ann, type = "prob")[,2]
+base_ann_tolerance_pred <- predict(base_ann_tolerance, newdata = base_level_test_ann, type = "prob")[,2]
+```
+
+# Optimize Prediction Threshold  {.tabset}
+## Base "Best" ANN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Best-ANN, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_ann_best_pred, base_level_test_ann$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_ann_best_pred, base_level_test_ann$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_ann_best_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_ann)==min(abs(output$Sensitivity-target_ann)))[1]
+base_ann_best_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_ann)==min(abs(output$Specificity-target_ann)))[1]
+base_ann_best_opt_specificity_thresh <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Base "oneSE" ANN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-OneSE-ANN, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_ann_oneSE_pred, base_level_test_ann$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_ann_oneSE_pred, base_level_test_ann$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_ann_oneSE_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_ann)==min(abs(output$Sensitivity-target_ann)))[1]
+base_ann_oneSE_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_ann)==min(abs(output$Specificity-target_ann)))[1]
+base_ann_oneSE_opt_specificity_thresh <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Base "Tolerance" ANN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Tolerance-ANN, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_ann_tolerance_pred, base_level_test_ann$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_ann_tolerance_pred, base_level_test_ann$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_ann_tolerance_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_ann)==min(abs(output$Sensitivity-target_ann)))[1]
+base_ann_tolerance_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_ann)==min(abs(output$Specificity-target_ann)))[1]
+base_ann_tolerance_opt_specificity_thresh <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+# Create Base level Test Predictions Output for the ANN Methods
+```{r Base-Level-Decision-Tree-Selector-Train-ANN, include=FALSE}
+base_best_ann_best_kappa_pred_value  <- ifelse(base_ann_best_pred >= base_ann_best_opt_kappa_thresh, "M", "B")
+base_best_ann_best_sensitivity_pred_value  <- ifelse(base_ann_best_pred >= base_ann_best_opt_sensitivity_thresh, "M", "B")
+base_best_ann_best_specificity_pred_value  <- ifelse(base_ann_best_pred >= base_ann_best_opt_specificity_thresh, "M", "B")
+base_ann_oneSE_best_kappa_pred_value  <- ifelse(base_ann_oneSE_pred >= base_ann_oneSE_opt_kappa_thresh, "M", "B")
+base_ann_oneSE_best_sensitivity_pred_value  <- ifelse(base_ann_oneSE_pred >= base_ann_oneSE_opt_sensitivity_thresh, "M", "B")
+base_ann_oneSE_best_specificity_pred_value  <- ifelse(base_ann_oneSE_pred >= base_ann_oneSE_opt_specificity_thresh, "M", "B")
+base_ann_tolerance_best_kappa_pred_value  <- ifelse(base_ann_tolerance_pred >= base_ann_tolerance_opt_kappa_thresh, "M", "B")
+base_ann_tolerance_best_sensitivity_pred_value  <- ifelse(base_ann_tolerance_pred >= base_ann_tolerance_opt_sensitivity_thresh, "M", "B")
+base_ann_tolerance_best_specificity_pred_value  <- ifelse(base_ann_tolerance_pred >= base_ann_tolerance_opt_specificity_thresh, "M", "B")
+
+decision_tree_train_ann_model_output <- cbind.data.frame(base_best_ann_best_kappa_pred_value, base_best_ann_best_sensitivity_pred_value, base_best_ann_best_specificity_pred_value,
+                                                         base_ann_oneSE_best_kappa_pred_value, base_ann_oneSE_best_sensitivity_pred_value, base_ann_oneSE_best_specificity_pred_value,
+                                                         base_ann_tolerance_best_kappa_pred_value, base_ann_tolerance_best_sensitivity_pred_value, base_ann_tolerance_best_specificity_pred_value,
+                                                         base_level_test$diagnosis)
+
+names(decision_tree_train_ann_model_output) <- c("Base_Best_ANN_Kappa", "Base_Best_ANN_Sensitivity", "Base_Best_ANN_Specificity", 
+                                                 "Base_oneSE_ANN_Kappa", "Base_oneSE_ANN_Sensitivity",  "Base_oneSE_ANN_Specificity", 
+                                                 "Base_Tolerance_ANN_Kappa", "Base_Tolerance_ANN_Sensitivity", "Base_Tolerance_ANN_Specificity",
+                                                 "Actual")
+
+decision_tree_train_ann_model_output$Base_Best_ANN_Kappa <- as.factor(decision_tree_train_ann_model_output$Base_Best_ANN_Kappa)
+
+decision_tree_train_ann_model_output$Base_Best_ANN_Sensitivity <- as.factor(decision_tree_train_ann_model_output$Base_Best_ANN_Sensitivity)
+
+decision_tree_train_ann_model_output$Base_Best_ANN_Specificity <- as.factor(decision_tree_train_ann_model_output$Base_Best_ANN_Specificity)
+
+decision_tree_train_ann_model_output$Base_oneSE_ANN_Kappa <- as.factor(decision_tree_train_ann_model_output$Base_oneSE_ANN_Kappa)
+
+decision_tree_train_ann_model_output$Base_oneSE_ANN_Sensitivity <- as.factor(decision_tree_train_ann_model_output$Base_oneSE_ANN_Sensitivity)
+
+decision_tree_train_ann_model_output$Base_oneSE_ANN_Specificity <- as.factor(decision_tree_train_ann_model_output$Base_oneSE_ANN_Specificity)
+
+decision_tree_train_ann_model_output$Base_Tolerance_ANN_Kappa <- as.factor(decision_tree_train_ann_model_output$Base_Tolerance_ANN_Kappa)
+
+decision_tree_train_ann_model_output$Base_Tolerance_ANN_Sensitivity <- as.factor(decision_tree_train_ann_model_output$Base_Tolerance_ANN_Sensitivity)
+
+decision_tree_train_ann_model_output$Base_Tolerance_ANN_Specificity <- as.factor(decision_tree_train_ann_model_output$Base_Tolerance_ANN_Specificity)
+
+decision_tree_train_ann_model_output$Actual <- as.factor(decision_tree_train_ann_model_output$Actual)
+```
+
+```{r}
+head(decision_tree_train_ann_model_output, 8)
+```
+
+
+# Analyze Individual Model Results {.tabset}
+
+## Base Best ANN Highest Kappa Model
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_Best_ANN_Kappa, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base Best ANN: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_Best_ANN_Sensitivity, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base Best ANN: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_Best_ANN_Specificity, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base oneSE ANN: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_oneSE_ANN_Kappa, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base oneSE ANN: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_oneSE_ANN_Sensitivity, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base oneSE ANN: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_oneSE_ANN_Specificity, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance ANN: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_Tolerance_ANN_Kappa, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance ANN: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_Tolerance_ANN_Sensitivity, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance ANN: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_ann_model_output$Base_Tolerance_ANN_Specificity, decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+
+# Train Decision Tree
+```{r, include=FALSE}
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_best_tree_ann_model_selector <- train(Actual ~ ., data = decision_tree_train_ann_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+
+base_best_model <- base_best_tree_ann_model_selector$bestTune$model
+base_best_trials <- base_best_tree_ann_model_selector$bestTune$trials
+base_best_winnow <- base_best_tree_ann_model_selector$bestTune$winnow
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_oneSE_tree_ann_model_selector <- train(Actual ~ ., data = decision_tree_train_ann_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_oneSE_model <- base_oneSE_tree_ann_model_selector$bestTune$model
+base_oneSE_trials <- base_oneSE_tree_ann_model_selector$bestTune$trials
+base_oneSE_winnow <- base_oneSE_tree_ann_model_selector$bestTune$winnow
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_tolerance_tree_ann_model_selector <- train(Actual ~ ., data = decision_tree_train_ann_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_tolerance_model <- base_tolerance_tree_ann_model_selector$bestTune$model
+base_tolerance_trials <- base_tolerance_tree_ann_model_selector$bestTune$trials
+base_tolerance_winnow <- base_tolerance_tree_ann_model_selector$bestTune$winnow
+```
+
+# Plot ANN Decision Logic
+```{r}
+base_best_tree_ann_model_plotter <- C5.0(Actual~., data = decision_tree_train_ann_model_output, cost = error_cost, model = base_best_model, trials = base_best_trials, winnow = base_best_winnow)
+
+base_oneSE_tree_ann_model_plotter <- C5.0(Actual~., data = decision_tree_train_ann_model_output, cost = error_cost, model = base_oneSE_model, trials = base_oneSE_trials, winnow = base_oneSE_winnow)
+
+base_tolerance_tree_ann_model_plotter <- C5.0(Actual~., data = decision_tree_train_ann_model_output, cost = error_cost, model = base_tolerance_model, trials = base_tolerance_trials, winnow = base_tolerance_winnow)
+```
+
+```{r, echo=FALSE}
+par(mfrow = c(3,1))
+base_best_tree_ann_model_plotter %>% plot(main = "Best Train Method")
+base_oneSE_tree_ann_model_plotter %>% plot(main = "oneSE Train Method")
+base_tolerance_tree_ann_model_plotter %>% plot(main = "Tolerance Train Method")
+```
+
+# Check Base level Tree Results ANN {.tabset}
+## Best
+```{r}
+base_best_ann_tree_pred <-  predict(base_best_tree_ann_model_selector, newdata = decision_tree_train_ann_model_output, "raw")
+confusionMatrix(as.factor(base_best_ann_tree_pred), decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## OneSE
+```{r}
+base_oneSE_ann_tree_pred <-  predict(base_oneSE_tree_ann_model_selector, newdata = decision_tree_train_ann_model_output, "raw")
+confusionMatrix(as.factor(base_oneSE_ann_tree_pred), decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+## Tolerance
+```{r}
+base_tolerance_ann_tree_pred <-  predict(base_tolerance_tree_ann_model_selector, newdata = decision_tree_train_ann_model_output, "raw")
+confusionMatrix(as.factor(base_tolerance_ann_tree_pred), decision_tree_train_ann_model_output$Actual, positive = "M")
+```
+
+
+
+# Random Forest
+```{r, results='hide'}
+base_level_train_rf_upsampled <- upSample(x = base_level_train_rf[,-ncol(base_level_train_rf)], y = base_level_train_rf$diagnosis) 
+base_level_train_rf_upsampled$diagnosis <- base_level_train_rf_upsampled$Class
+
+base_level_train_rf_upsampled$Class <- NULL
+
+grid <- expand.grid(.mtry = seq(1, ncol(base_level_train_rf_upsampled), 1))
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+set.seed(23)
+base_rf_best <- train(diagnosis~., data = base_level_train_rf_upsampled, method = "rf",
+                      tuneGrid = grid,
+                      metric = "Kappa", 
+                      trControl = ctrl)
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+set.seed(23)
+base_rf_oneSE <- train(diagnosis~., data = base_level_train_rf_upsampled, method = "rf",
+                       tuneGrid = grid,
+                       metric = "Kappa", 
+                       trControl = ctrl)
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+set.seed(23)
+base_rf_tolerance <- train(diagnosis~., data = base_level_train_rf_upsampled, method = "rf",
+                           tuneGrid = grid,
+                           metric = "Kappa", 
+                           trControl = ctrl)
+```
+
+# Create Predictions
+```{r Create-RF-Model-Prediction-Response}
+# Create Predictions
+base_rf_best_pred <- predict(base_rf_best, newdata = base_level_test_rf, type = "prob")[,2]
+base_rf_oneSE_pred <- predict(base_rf_oneSE, newdata = base_level_test_rf, type = "prob")[,2]
+base_rf_tolerance_pred <- predict(base_rf_tolerance, newdata = base_level_test_rf, type = "prob")[,2]
+```
+
+# Optimize Prediction Threshold  {.tabset}
+## Base "Best" Random Forest Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Best-RF, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_rf_best_pred, base_level_test_rf$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_rf_best_pred, base_level_test_rf$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_rf_best_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_rf)==min(abs(output$Sensitivity-target_rf)))[1]
+base_rf_best_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_rf)==min(abs(output$Specificity-target_rf)))[1]
+base_rf_best_opt_specificity_thresh <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Base "oneSE" Random Forest Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-OneSE-RF, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_rf_oneSE_pred, base_level_test_rf$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_rf_oneSE_pred, base_level_test_rf$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_rf_oneSE_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_rf)==min(abs(output$Sensitivity-target_rf)))[1]
+base_rf_oneSE_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_rf)==min(abs(output$Specificity-target_rf)))[1]
+base_rf_oneSE_opt_specificity_thresh <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+## Base "Tolerance" Random Forest Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Tolerance-RF, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_rf_tolerance_pred, base_level_test_rf$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_rf_tolerance_pred, base_level_test_rf$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_rf_tolerance_opt_kappa_thresh <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_rf)==min(abs(output$Sensitivity-target_rf)))[1]
+base_rf_tolerance_opt_sensitivity_thresh <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_rf)==min(abs(output$Specificity-target_rf)))[1]
+base_rf_tolerance_opt_specificity_thresh <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+# Create Base level Test Predictions Output for the Random Forest Methods
+```{r Base-Level-Decision-Tree-Selector-Train-RF, include=FALSE}
+base_best_rf_best_kappa_pred_value  <- ifelse(base_rf_best_pred >= base_rf_best_opt_kappa_thresh, "M", "B")
+base_best_rf_best_sensitivity_pred_value  <- ifelse(base_rf_best_pred >= base_rf_best_opt_sensitivity_thresh, "M", "B")
+base_best_rf_best_specificity_pred_value  <- ifelse(base_rf_best_pred >= base_rf_best_opt_specificity_thresh, "M", "B")
+base_rf_oneSE_best_kappa_pred_value  <- ifelse(base_rf_oneSE_pred >= base_rf_oneSE_opt_kappa_thresh, "M", "B")
+base_rf_oneSE_best_sensitivity_pred_value  <- ifelse(base_rf_oneSE_pred >= base_rf_oneSE_opt_sensitivity_thresh, "M", "B")
+base_rf_oneSE_best_specificity_pred_value  <- ifelse(base_rf_oneSE_pred >= base_rf_oneSE_opt_specificity_thresh, "M", "B")
+base_rf_tolerance_best_kappa_pred_value  <- ifelse(base_rf_tolerance_pred >= base_rf_tolerance_opt_kappa_thresh, "M", "B")
+base_rf_tolerance_best_sensitivity_pred_value  <- ifelse(base_rf_tolerance_pred >= base_rf_tolerance_opt_sensitivity_thresh, "M", "B")
+base_rf_tolerance_best_specificity_pred_value  <- ifelse(base_rf_tolerance_pred >= base_rf_tolerance_opt_specificity_thresh, "M", "B")
+
+decision_tree_train_rf_model_output <- cbind.data.frame(base_best_rf_best_kappa_pred_value, base_best_rf_best_sensitivity_pred_value, base_best_rf_best_specificity_pred_value,
+                                                         base_rf_oneSE_best_kappa_pred_value, base_rf_oneSE_best_sensitivity_pred_value, base_rf_oneSE_best_specificity_pred_value,
+                                                         base_rf_tolerance_best_kappa_pred_value, base_rf_tolerance_best_sensitivity_pred_value, base_rf_tolerance_best_specificity_pred_value,
+                                                         base_level_test$diagnosis)
+
+names(decision_tree_train_rf_model_output) <- c("Base_Best_RF_Kappa", "Base_Best_RF_Sensitivity", "Base_Best_RF_Specificity", 
+                                                 "Base_oneSE_RF_Kappa", "Base_oneSE_RF_Sensitivity",  "Base_oneSE_RF_Specificity", 
+                                                 "Base_Tolerance_RF_Kappa", "Base_Tolerance_RF_Sensitivity", "Base_Tolerance_RF_Specificity",
+                                                 "Actual")
+
+decision_tree_train_rf_model_output$Base_Best_RF_Kappa <- as.factor(decision_tree_train_rf_model_output$Base_Best_RF_Kappa)
+
+decision_tree_train_rf_model_output$Base_Best_RF_Sensitivity <- as.factor(decision_tree_train_rf_model_output$Base_Best_RF_Sensitivity)
+
+decision_tree_train_rf_model_output$Base_Best_RF_Specificity <- as.factor(decision_tree_train_rf_model_output$Base_Best_RF_Specificity)
+
+decision_tree_train_rf_model_output$Base_oneSE_RF_Kappa <- as.factor(decision_tree_train_rf_model_output$Base_oneSE_RF_Kappa)
+
+decision_tree_train_rf_model_output$Base_oneSE_RF_Sensitivity <- as.factor(decision_tree_train_rf_model_output$Base_oneSE_RF_Sensitivity)
+
+decision_tree_train_rf_model_output$Base_oneSE_RF_Specificity <- as.factor(decision_tree_train_rf_model_output$Base_oneSE_RF_Specificity)
+
+decision_tree_train_rf_model_output$Base_Tolerance_RF_Kappa <- as.factor(decision_tree_train_rf_model_output$Base_Tolerance_RF_Kappa)
+
+decision_tree_train_rf_model_output$Base_Tolerance_RF_Sensitivity <- as.factor(decision_tree_train_rf_model_output$Base_Tolerance_RF_Sensitivity)
+
+decision_tree_train_rf_model_output$Base_Tolerance_RF_Specificity <- as.factor(decision_tree_train_rf_model_output$Base_Tolerance_RF_Specificity)
+
+decision_tree_train_rf_model_output$Actual <- as.factor(decision_tree_train_rf_model_output$Actual)
+```
+
+
+```{r}
+head(decision_tree_train_rf_model_output, 8)
+```
+
+
+# Analyze Individual Model Results {.tabset}
+
+## Base Best RF Highest Kappa Model
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_Best_RF_Kappa, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base Best RF: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_Best_RF_Sensitivity, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base Best RF: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_Best_RF_Specificity, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base oneSE RF: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_oneSE_RF_Kappa, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base oneSE RF: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_oneSE_RF_Sensitivity, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base oneSE RF: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_oneSE_RF_Specificity, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance RF: Highest Kappa
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_Tolerance_RF_Kappa, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance RF: Selected Sensitivity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_Tolerance_RF_Sensitivity, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Base Tolerance RF: Selected Specificity
+```{r}
+# Confusion Matrix 
+confusionMatrix(decision_tree_train_rf_model_output$Base_Tolerance_RF_Specificity, decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+# Train Decision Tree
+```{r, include=FALSE}
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "best")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_best_tree_rf_model_selector <- train(Actual ~ ., data = decision_tree_train_rf_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+
+base_best_model <- base_best_tree_rf_model_selector$bestTune$model
+base_best_trials <- base_best_tree_rf_model_selector$bestTune$trials
+base_best_winnow <- base_best_tree_rf_model_selector$bestTune$winnow
+
+
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_oneSE_tree_rf_model_selector <- train(Actual ~ ., data = decision_tree_train_rf_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_oneSE_model <- base_oneSE_tree_rf_model_selector$bestTune$model
+base_oneSE_trials <- base_oneSE_tree_rf_model_selector$bestTune$trials
+base_oneSE_winnow <- base_oneSE_tree_rf_model_selector$bestTune$winnow
+
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "tolerance")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_tolerance_tree_rf_model_selector <- train(Actual ~ ., data = decision_tree_train_rf_model_output,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_tolerance_model <- base_tolerance_tree_rf_model_selector$bestTune$model
+base_tolerance_trials <- base_tolerance_tree_rf_model_selector$bestTune$trials
+base_tolerance_winnow <- base_tolerance_tree_rf_model_selector$bestTune$winnow
+```
+
+# Plot Random Forest Decision Logic
+```{r}
+base_best_tree_rf_model_plotter <- C5.0(Actual~., data = decision_tree_train_rf_model_output, cost = error_cost, model = base_best_model, trials = base_best_trials, winnow = base_best_winnow)
+
+base_oneSE_tree_rf_model_plotter <- C5.0(Actual~., data = decision_tree_train_rf_model_output, cost = error_cost, model = base_oneSE_model, trials = base_oneSE_trials, winnow = base_oneSE_winnow)
+
+base_tolerance_tree_rf_model_plotter <- C5.0(Actual~., data = decision_tree_train_rf_model_output, cost = error_cost, model = base_tolerance_model, trials = base_tolerance_trials, winnow = base_tolerance_winnow)
+```
+
+```{r, echo=FALSE}
+par(mfrow = c(3,1))
+base_best_tree_rf_model_plotter %>% plot(main = "Best Train Method")
+base_oneSE_tree_rf_model_plotter %>% plot(main = "oneSE Train Method")
+base_tolerance_tree_rf_model_plotter %>% plot(main = "Tolerance Train Method")
+```
+
+# Check Base level Tree Results Random Forest {.tabset}
+## Best
+```{r}
+base_best_rf_tree_pred <-  predict(base_best_tree_rf_model_selector, newdata = decision_tree_train_rf_model_output, "raw")
+confusionMatrix(as.factor(base_best_rf_tree_pred), decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## OneSE
+```{r}
+base_oneSE_rf_tree_pred <-  predict(base_oneSE_tree_rf_model_selector, newdata = decision_tree_train_rf_model_output, "raw")
+confusionMatrix(as.factor(base_oneSE_rf_tree_pred), decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+## Tolerance
+```{r}
+base_tolerance_rf_tree_pred <-  predict(base_tolerance_tree_rf_model_selector, newdata = decision_tree_train_rf_model_output, "raw")
+confusionMatrix(as.factor(base_tolerance_rf_tree_pred), decision_tree_train_rf_model_output$Actual, positive = "M")
+```
+
+
+# Create Ensemble of Ensemble Decision Tree Train
+```{r}
+decision_tree_train_ensemble_of_ensembles <- cbind.data.frame(base_best_log_tree_pred, base_oneSE_log_tree_pred, base_tolerance_log_tree_pred,
+                                                              base_best_knn_tree_pred, base_oneSE_knn_tree_pred, base_tolerance_knn_tree_pred,
+                                                              base_best_ann_tree_pred, base_oneSE_ann_tree_pred, base_tolerance_ann_tree_pred,
+                                                              base_best_rf_tree_pred, base_oneSE_rf_tree_pred, base_tolerance_rf_tree_pred,
+                                                              base_level_test$diagnosis)
+names(decision_tree_train_ensemble_of_ensembles) <- c("Best_Log", "OneSE_Log", "Tolerance_Log",
+                                                      "Best_KNN", "OneSE_KNN", "Tolerance_KNN",
+                                                      "Best_ANN", "OneSE_ANN", "Tolerance_ANN",
+                                                      "Best_RF", "OneSE_RF", "Tolerance_RF",
+                                                      "Actual")
+
+head(decision_tree_train_ensemble_of_ensembles, 8)
+
+```
+
+# Train Decision Tree Ensemble of Ensmbles
+```{r, include=FALSE}
+ctrl <- trainControl(method = "cv", number = global_cv_folds, selectionFunction = "oneSE")
+
+grid <- expand.grid(.model = "tree",
+                    .trials = global_trials,
+                    .winnow = global_winnow)
+set.seed(23)
+base_oneSE_tree_model_selector <- train(Actual ~ ., data = decision_tree_train_ensemble_of_ensembles,
+                                            cost = error_cost, 
+                                            method = "C5.0",
+                                            metric = "Kappa",
+                                            trControl = ctrl,
+                                            tuneGrid = grid)
+
+base_oneSE_model <- base_oneSE_tree_model_selector$bestTune$model
+base_oneSE_trials <- base_oneSE_tree_model_selector$bestTune$trials
+base_oneSE_winnow <- base_oneSE_tree_model_selector$bestTune$winnow
+```
+
+# Plot Ensemble of Ensmble Decision Logic
+```{r}
+base_oneSE_tree_model_plotter <- C5.0(Actual~., data = decision_tree_train_ensemble_of_ensembles, cost = error_cost, model = base_oneSE_model, trials = base_oneSE_trials, winnow = base_oneSE_winnow)
+
+
+```
+
+```{r, echo=FALSE}
+base_oneSE_tree_model_plotter %>% plot(main = "oneSE Train Method")
+```
+
+# Check Base level Tree Results
+## OneSE
+```{r}
+base_oneSE_tree_pred <-  predict(base_oneSE_tree_model_selector, newdata = decision_tree_train_ensemble_of_ensembles, "raw")
+confusionMatrix(as.factor(base_oneSE_tree_pred), decision_tree_train_ensemble_of_ensembles$Actual, positive = "M")
+```
+
+
+# Create Ensemble Model
+
+# Create Predictions {.tabset}
+## Logistic Regression
+```{r}
+base_log_pred_final <- predict(base_log_model, newdata = final_hold_out, type = "response")
+best_backward_log_pred_final <- predict(best_backward_log_model, newdata = final_hold_out, type = "response")
+best_forward_log_pred_final <- predict(best_forward_log_model, newdata = final_hold_out, type = "response")
+```
+
+## KNN
+```{r}
+base_knn_best_pred_final <- predict(base_knn_best, newdata = final_hold_out_knn, type = "prob")[,2]
+base_knn_oneSE_pred_final <- predict(base_knn_oneSE, newdata = final_hold_out_knn, type = "prob")[,2]
+base_knn_tolerance_pred_final <- predict(base_knn_tolerance, newdata = final_hold_out_knn, type = "prob")[,2]
+```
+
+## ANN
+```{r}
+base_ann_best_pred_final <- predict(base_ann_best, newdata = final_hold_out_ann, type = "prob")[,2]
+base_ann_oneSE_pred_final <- predict(base_ann_oneSE, newdata = final_hold_out_ann, type = "prob")[,2]
+base_ann_tolerance_pred_final <- predict(base_ann_tolerance, newdata = final_hold_out_ann, type = "prob")[,2]
+```
+
+## Random Forest
+```{r}
+base_rf_best_pred_final <- predict(base_rf_best, newdata = final_hold_out_rf, type = "prob")[,2]
+base_rf_oneSE_pred_final <- predict(base_rf_oneSE, newdata = final_hold_out_rf, type = "prob")[,2]
+base_rf_tolerance_pred_final <- predict(base_rf_tolerance, newdata = final_hold_out_rf, type = "prob")[,2]
+```
+
+
+# Results {.tabset}
+## Logistic Regression
+### Base Log Regression Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Base-Log-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_log_pred_final, final_hold_out$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_log_pred_final, final_hold_out$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_log)==min(abs(output$Sensitivity-target_log)))[1]
+base_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_log)==min(abs(output$Specificity-target_log)))[1]
+base_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Best Backwards Stepwise Log Regression Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Backwards-Log-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, best_backward_log_pred_final, final_hold_out$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, best_backward_log_pred_final, final_hold_out$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+backward_search_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_log)==min(abs(output$Sensitivity-target_log)))[1]
+backward_search_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_log)==min(abs(output$Specificity-target_log)))[1]
+backward_search_opt_specificity_thresh_final <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Best Forward Stepwise Log Regression Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Forward-Log-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, best_forward_log_pred_final, final_hold_out$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, best_forward_log_pred_final, final_hold_out$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+forward_search_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_log)==min(abs(output$Sensitivity-target_log)))[1]
+forward_search_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_log)==min(abs(output$Specificity-target_log)))[1]
+forward_search_opt_specificity_thresh_final <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Create Base level Test Predictions Output for the Log Regression Methods
+```{r Final-Level-Decision-Tree-Selector-Train-Log, include=FALSE}
+base_log_best_kappa_pred_value_final  <- ifelse(base_log_pred_final >= base_opt_kappa_thresh_final, "M", "B")
+base_log_best_sensitivity_pred_value_final  <- ifelse(base_log_pred_final >= base_opt_sensitivity_thresh_final, "M", "B")
+base_log_best_specificity_pred_value_final  <- ifelse(base_log_pred_final >= base_opt_specificity_thresh_final, "M", "B")
+best_backward_log_best_kappa_pred_value_final  <- ifelse(best_backward_log_pred_final >= backward_search_opt_kappa_thresh_final, "M", "B")
+best_backward_log_best_sensitivity_pred_value_final  <- ifelse(best_backward_log_pred_final >= backward_search_opt_sensitivity_thresh_final, "M", "B")
+best_backward_log_best_specificity_pred_value_final  <- ifelse(best_backward_log_pred_final >= backward_search_opt_specificity_thresh_final, "M", "B")
+best_forward_log_best_kappa_pred_value_final  <- ifelse(best_forward_log_pred_final >= forward_search_opt_kappa_thresh_final, "M", "B")
+best_forward_log_best_sensitivity_pred_value_final  <- ifelse(best_forward_log_pred_final >= forward_search_opt_sensitivity_thresh_final, "M", "B")
+best_forward_log_best_specificity_pred_value_final  <- ifelse(best_forward_log_pred_final >= forward_search_opt_specificity_thresh_final, "M", "B")
+
+decision_tree_ensemble_log_model_output <- cbind.data.frame(base_log_best_kappa_pred_value_final, base_log_best_sensitivity_pred_value_final, base_log_best_specificity_pred_value_final,
+                                                         best_backward_log_best_kappa_pred_value_final, best_backward_log_best_sensitivity_pred_value_final, best_backward_log_best_specificity_pred_value_final,
+                                                         best_forward_log_best_kappa_pred_value_final, best_forward_log_best_sensitivity_pred_value_final, best_forward_log_best_specificity_pred_value_final,
+                                                         final_hold_out$diagnosis)
+
+names(decision_tree_ensemble_log_model_output) <- c("Base_Log_Kappa", "Base_Log_Sensitivity", "Base_Log_Specificity", 
+                                                 "Backward_Log_Kappa", "Backward_Log_Sensitivity",  "Backward_Log_Specificity", 
+                                                 "Forward_Log_Kappa", "Forward_Log_Sensitivity", "Forward_Log_Specificity",
+                                                 "Actual")
+
+decision_tree_ensemble_log_model_output$Base_Log_Kappa <- as.factor(decision_tree_ensemble_log_model_output$Base_Log_Kappa)
+
+decision_tree_ensemble_log_model_output$Base_Log_Sensitivity <- as.factor(decision_tree_ensemble_log_model_output$Base_Log_Sensitivity)
+
+decision_tree_ensemble_log_model_output$Base_Log_Specificity <- as.factor(decision_tree_ensemble_log_model_output$Base_Log_Specificity)
+
+decision_tree_ensemble_log_model_output$Backward_Log_Kappa <- as.factor(decision_tree_ensemble_log_model_output$Backward_Log_Kappa)
+
+decision_tree_ensemble_log_model_output$Backward_Log_Sensitivity <- as.factor(decision_tree_ensemble_log_model_output$Backward_Log_Sensitivity)
+
+decision_tree_ensemble_log_model_output$Backward_Log_Specificity <- as.factor(decision_tree_ensemble_log_model_output$Backward_Log_Specificity)
+
+decision_tree_ensemble_log_model_output$Forward_Log_Kappa <- as.factor(decision_tree_ensemble_log_model_output$Forward_Log_Kappa)
+
+decision_tree_ensemble_log_model_output$Forward_Log_Sensitivity <- as.factor(decision_tree_ensemble_log_model_output$Forward_Log_Sensitivity)
+
+decision_tree_ensemble_log_model_output$Forward_Log_Specificity <- as.factor(decision_tree_ensemble_log_model_output$Forward_Log_Specificity)
+
+decision_tree_ensemble_log_model_output$Actual <- as.factor(decision_tree_ensemble_log_model_output$Actual)
+```
+
+```{r}
+head(decision_tree_ensemble_log_model_output, 8)
+```
+
+### Logistic Regression Output Predictions
+```{r}
+final_log_models_prediction_best <- predict(base_best_tree_log_model_selector, decision_tree_ensemble_log_model_output, type = "raw")
+confusionMatrix(final_log_models_prediction_best, decision_tree_ensemble_log_model_output$Actual, positive = "M")
+```
+
+### Logistic Regression Output Predictions
+```{r}
+final_log_models_prediction_oneSE <- predict(base_oneSE_tree_log_model_selector, decision_tree_ensemble_log_model_output, type = "raw")
+confusionMatrix(final_log_models_prediction_oneSE, decision_tree_ensemble_log_model_output$Actual, positive = "M")
+```
+
+### Logistic Regression Output Predictions
+```{r}
+final_log_models_prediction_tolerance <- predict(base_tolerance_tree_log_model_selector, decision_tree_ensemble_log_model_output, type = "raw")
+confusionMatrix(final_log_models_prediction_tolerance, decision_tree_ensemble_log_model_output$Actual, positive = "M")
+```
+
+## KNN
+### Base "Best" KNN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Best-KNN-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_knn_best_pred_final, final_hold_out_knn$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_knn_best_pred_final, final_hold_out_knn$diagnosis)
+    output <- rbind(output, output_temp) 
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_knn_best_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_knn)==min(abs(output$Sensitivity-target_knn)))[1]
+base_knn_best_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_knn)==min(abs(output$Specificity-target_knn)))[1]
+base_knn_best_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Base "oneSE" KNN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-OneSE-KNN-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_knn_oneSE_pred_final, final_hold_out_knn$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_knn_oneSE_pred_final, final_hold_out_knn$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_knn_oneSE_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_knn)==min(abs(output$Sensitivity-target_knn)))[1]
+base_knn_oneSE_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_knn)==min(abs(output$Specificity-target_knn)))[1]
+base_knn_oneSE_opt_specificity_thresh_final <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Base "Tolerance" KNN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Tolerance-KNN-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_knn_tolerance_pred_final, final_hold_out_knn$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_knn_tolerance_pred_final, final_hold_out_knn$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_knn_tolerance_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_knn)==min(abs(output$Sensitivity-target_knn)))[1]
+base_knn_tolerance_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_knn)==min(abs(output$Specificity-target_knn)))[1]
+base_knn_tolerance_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Create Base level Test Predictions Output for the KNN Methods
+```{r Final-Level-Decision-Tree-Selector-Train-KNN, include=FALSE}
+base_best_knn_best_kappa_pred_value_final  <- ifelse(base_knn_best_pred_final >= base_knn_best_opt_kappa_thresh_final, "M", "B")
+base_best_knn_best_sensitivity_pred_value_final  <- ifelse(base_knn_best_pred_final >= base_knn_best_opt_sensitivity_thresh_final, "M", "B")
+base_best_knn_best_specificity_pred_value_final  <- ifelse(base_knn_best_pred_final >= base_knn_best_opt_specificity_thresh_final, "M", "B")
+base_knn_oneSE_best_kappa_pred_value_final  <- ifelse(base_knn_oneSE_pred_final >= base_knn_oneSE_opt_kappa_thresh, "M", "B")
+base_knn_oneSE_best_sensitivity_pred_value_final  <- ifelse(base_knn_oneSE_pred_final >= base_knn_oneSE_opt_sensitivity_thresh_final, "M", "B")
+base_knn_oneSE_best_specificity_pred_value_final  <- ifelse(base_knn_oneSE_pred_final >= base_knn_oneSE_opt_specificity_thresh_final, "M", "B")
+base_knn_tolerance_best_kappa_pred_value_final  <- ifelse(base_knn_tolerance_pred_final >= base_knn_tolerance_opt_kappa_thresh, "M", "B")
+base_knn_tolerance_best_sensitivity_pred_value_final  <- ifelse(base_knn_tolerance_pred_final >= base_knn_tolerance_opt_sensitivity_thresh_final, "M", "B")
+base_knn_tolerance_best_specificity_pred_value_final  <- ifelse(base_knn_tolerance_pred_final >= base_knn_tolerance_opt_specificity_thresh_final, "M", "B")
+
+decision_tree_ensemble_knn_model_output <- cbind.data.frame(base_best_knn_best_kappa_pred_value_final, base_best_knn_best_sensitivity_pred_value_final, base_best_knn_best_specificity_pred_value_final,
+                                                            base_knn_oneSE_best_kappa_pred_value_final, base_knn_oneSE_best_sensitivity_pred_value_final, base_knn_oneSE_best_specificity_pred_value_final,
+                                                            base_knn_tolerance_best_kappa_pred_value_final, base_knn_tolerance_best_sensitivity_pred_value_final, base_knn_tolerance_best_specificity_pred_value_final,
+                                                            final_hold_out_knn$diagnosis)
+
+names(decision_tree_ensemble_knn_model_output) <- c("Base_Best_KNN_Kappa", "Base_Best_KNN_Sensitivity", "Base_Best_KNN_Specificity", 
+                                                    "Base_oneSE_KNN_Kappa", "Base_oneSE_KNN_Sensitivity",  "Base_oneSE_KNN_Specificity", 
+                                                    "Base_Tolerance_KNN_Kappa", "Base_Tolerance_KNN_Sensitivity", "Base_Tolerance_KNN_Specificity",
+                                                    "Actual")
+
+decision_tree_ensemble_knn_model_output$Base_Best_KNN_Kappa <- as.factor(decision_tree_ensemble_knn_model_output$Base_Best_KNN_Kappa)
+
+decision_tree_ensemble_knn_model_output$Base_Best_KNN_Sensitivity <- as.factor(decision_tree_ensemble_knn_model_output$Base_Best_KNN_Sensitivity)
+
+decision_tree_ensemble_knn_model_output$Base_Best_KNN_Specificity <- as.factor(decision_tree_ensemble_knn_model_output$Base_Best_KNN_Specificity)
+
+decision_tree_ensemble_knn_model_output$Base_oneSE_KNN_Kappa <- as.factor(decision_tree_ensemble_knn_model_output$Base_oneSE_KNN_Kappa)
+
+decision_tree_ensemble_knn_model_output$Base_oneSE_KNN_Sensitivity <- as.factor(decision_tree_ensemble_knn_model_output$Base_oneSE_KNN_Sensitivity)
+
+decision_tree_ensemble_knn_model_output$Base_oneSE_KNN_Specificity <- as.factor(decision_tree_ensemble_knn_model_output$Base_oneSE_KNN_Specificity)
+
+decision_tree_ensemble_knn_model_output$Base_Tolerance_KNN_Kappa <- as.factor(decision_tree_ensemble_knn_model_output$Base_Tolerance_KNN_Kappa)
+
+decision_tree_ensemble_knn_model_output$Base_Tolerance_KNN_Sensitivity <- as.factor(decision_tree_ensemble_knn_model_output$Base_Tolerance_KNN_Sensitivity)
+
+decision_tree_ensemble_knn_model_output$Base_Tolerance_KNN_Specificity <- as.factor(decision_tree_ensemble_knn_model_output$Base_Tolerance_KNN_Specificity)
+
+decision_tree_ensemble_knn_model_output$Actual <- as.factor(decision_tree_ensemble_knn_model_output$Actual)
+```
+
+### KNN Output Predictions
+```{r}
+final_knn_models_prediction_best <- predict(base_best_tree_knn_model_selector, decision_tree_ensemble_knn_model_output, type = "raw")
+confusionMatrix(final_knn_models_prediction_best, decision_tree_ensemble_knn_model_output$Actual, positive = "M")
+```
+
+### KNN Output Predictions
+```{r}
+final_knn_models_prediction_oneSE <- predict(base_oneSE_tree_knn_model_selector, decision_tree_ensemble_knn_model_output, type = "raw")
+confusionMatrix(final_knn_models_prediction_oneSE, decision_tree_ensemble_knn_model_output$Actual, positive = "M")
+```
+
+### KNN Output Predictions
+```{r}
+final_knn_models_prediction_tolerance <- predict(base_tolerance_tree_knn_model_selector, decision_tree_ensemble_knn_model_output, type = "raw")
+confusionMatrix(final_knn_models_prediction_tolerance, decision_tree_ensemble_knn_model_output$Actual, positive = "M")
+```
+
+## ANN
+### Base "Best" ANN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Best-ANN-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_ann_best_pred_final, final_hold_out_ann$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_ann_best_pred_final, final_hold_out_ann$diagnosis)
+    output <- rbind(output, output_temp) 
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_ann_best_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_ann)==min(abs(output$Sensitivity-target_ann)))[1]
+base_ann_best_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_ann)==min(abs(output$Specificity-target_ann)))[1]
+base_ann_best_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Base "oneSE" ANN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-OneSE-ANN-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_ann_oneSE_pred_final, final_hold_out_ann$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_ann_oneSE_pred_final, final_hold_out_ann$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_ann_oneSE_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_ann)==min(abs(output$Sensitivity-target_ann)))[1]
+base_ann_oneSE_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_ann)==min(abs(output$Specificity-target_ann)))[1]
+base_ann_oneSE_opt_specificity_thresh_final <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Base "Tolerance" ANN Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Tolerance-ANN-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_ann_tolerance_pred_final, final_hold_out_ann$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_ann_tolerance_pred_final, final_hold_out_ann$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_ann_tolerance_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_ann)==min(abs(output$Sensitivity-target_ann)))[1]
+base_ann_tolerance_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_ann)==min(abs(output$Specificity-target_ann)))[1]
+base_ann_tolerance_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Create Base level Test Predictions Output for the ANN Methods
+```{r Final-Level-Decision-Tree-Selector-Train-ANN, include=FALSE}
+base_best_ann_best_kappa_pred_value_final  <- ifelse(base_ann_best_pred_final >= base_ann_best_opt_kappa_thresh_final, "M", "B")
+base_best_ann_best_sensitivity_pred_value_final  <- ifelse(base_ann_best_pred_final >= base_ann_best_opt_sensitivity_thresh_final, "M", "B")
+base_best_ann_best_specificity_pred_value_final  <- ifelse(base_ann_best_pred_final >= base_ann_best_opt_specificity_thresh_final, "M", "B")
+base_ann_oneSE_best_kappa_pred_value_final  <- ifelse(base_ann_oneSE_pred_final >= base_ann_oneSE_opt_kappa_thresh, "M", "B")
+base_ann_oneSE_best_sensitivity_pred_value_final  <- ifelse(base_ann_oneSE_pred_final >= base_ann_oneSE_opt_sensitivity_thresh_final, "M", "B")
+base_ann_oneSE_best_specificity_pred_value_final  <- ifelse(base_ann_oneSE_pred_final >= base_ann_oneSE_opt_specificity_thresh_final, "M", "B")
+base_ann_tolerance_best_kappa_pred_value_final  <- ifelse(base_ann_tolerance_pred_final >= base_ann_tolerance_opt_kappa_thresh, "M", "B")
+base_ann_tolerance_best_sensitivity_pred_value_final  <- ifelse(base_ann_tolerance_pred_final >= base_ann_tolerance_opt_sensitivity_thresh_final, "M", "B")
+base_ann_tolerance_best_specificity_pred_value_final  <- ifelse(base_ann_tolerance_pred_final >= base_ann_tolerance_opt_specificity_thresh_final, "M", "B")
+
+decision_tree_ensemble_ann_model_output <- cbind.data.frame(base_best_ann_best_kappa_pred_value_final, base_best_ann_best_sensitivity_pred_value_final, base_best_ann_best_specificity_pred_value_final,
+                                                            base_ann_oneSE_best_kappa_pred_value_final, base_ann_oneSE_best_sensitivity_pred_value_final, base_ann_oneSE_best_specificity_pred_value_final,
+                                                            base_ann_tolerance_best_kappa_pred_value_final, base_ann_tolerance_best_sensitivity_pred_value_final, base_ann_tolerance_best_specificity_pred_value_final,
+                                                            final_hold_out_ann$diagnosis)
+
+names(decision_tree_ensemble_ann_model_output) <- c("Base_Best_ANN_Kappa", "Base_Best_ANN_Sensitivity", "Base_Best_ANN_Specificity", 
+                                                    "Base_oneSE_ANN_Kappa", "Base_oneSE_ANN_Sensitivity",  "Base_oneSE_ANN_Specificity", 
+                                                    "Base_Tolerance_ANN_Kappa", "Base_Tolerance_ANN_Sensitivity", "Base_Tolerance_ANN_Specificity",
+                                                    "Actual")
+
+decision_tree_ensemble_ann_model_output$Base_Best_ANN_Kappa <- as.factor(decision_tree_ensemble_ann_model_output$Base_Best_ANN_Kappa)
+
+decision_tree_ensemble_ann_model_output$Base_Best_ANN_Sensitivity <- as.factor(decision_tree_ensemble_ann_model_output$Base_Best_ANN_Sensitivity)
+
+decision_tree_ensemble_ann_model_output$Base_Best_ANN_Specificity <- as.factor(decision_tree_ensemble_ann_model_output$Base_Best_ANN_Specificity)
+
+decision_tree_ensemble_ann_model_output$Base_oneSE_ANN_Kappa <- as.factor(decision_tree_ensemble_ann_model_output$Base_oneSE_ANN_Kappa)
+
+decision_tree_ensemble_ann_model_output$Base_oneSE_ANN_Sensitivity <- as.factor(decision_tree_ensemble_ann_model_output$Base_oneSE_ANN_Sensitivity)
+
+decision_tree_ensemble_ann_model_output$Base_oneSE_ANN_Specificity <- as.factor(decision_tree_ensemble_ann_model_output$Base_oneSE_ANN_Specificity)
+
+decision_tree_ensemble_ann_model_output$Base_Tolerance_ANN_Kappa <- as.factor(decision_tree_ensemble_ann_model_output$Base_Tolerance_ANN_Kappa)
+
+decision_tree_ensemble_ann_model_output$Base_Tolerance_ANN_Sensitivity <- as.factor(decision_tree_ensemble_ann_model_output$Base_Tolerance_ANN_Sensitivity)
+
+decision_tree_ensemble_ann_model_output$Base_Tolerance_ANN_Specificity <- as.factor(decision_tree_ensemble_ann_model_output$Base_Tolerance_ANN_Specificity)
+
+decision_tree_ensemble_ann_model_output$Actual <- as.factor(decision_tree_ensemble_ann_model_output$Actual)
+```
+
+### ANN Output Predictions
+```{r}
+final_ann_models_prediction_best <- predict(base_best_tree_ann_model_selector, decision_tree_ensemble_ann_model_output, type = "raw")
+confusionMatrix(final_ann_models_prediction_best, decision_tree_ensemble_ann_model_output$Actual, positive = "M")
+```
+
+### ANN Output Predictions
+```{r}
+final_ann_models_prediction_oneSE <- predict(base_oneSE_tree_ann_model_selector, decision_tree_ensemble_ann_model_output, type = "raw")
+confusionMatrix(final_ann_models_prediction_oneSE, decision_tree_ensemble_ann_model_output$Actual, positive = "M")
+```
+
+### ANN Output Predictions
+```{r}
+final_ann_models_prediction_tolerance <- predict(base_tolerance_tree_ann_model_selector, decision_tree_ensemble_ann_model_output, type = "raw")
+confusionMatrix(final_ann_models_prediction_tolerance, decision_tree_ensemble_ann_model_output$Actual, positive = "M")
+```
+
+## RF
+### Base "Best" RF Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Best-RF-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_rf_best_pred_final, final_hold_out_rf$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_rf_best_pred_final, final_hold_out_rf$diagnosis)
+    output <- rbind(output, output_temp) 
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_rf_best_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_rf)==min(abs(output$Sensitivity-target_rf)))[1]
+base_rf_best_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_rf)==min(abs(output$Specificity-target_rf)))[1]
+base_rf_best_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Base "oneSE" RF Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-OneSE-RF-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_rf_oneSE_pred_final, final_hold_out_rf$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_rf_oneSE_pred_final, final_hold_out_rf$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_rf_oneSE_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_rf)==min(abs(output$Sensitivity-target_rf)))[1]
+base_rf_oneSE_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_rf)==min(abs(output$Specificity-target_rf)))[1]
+base_rf_oneSE_opt_specificity_thresh_final <- thresh_search[lookup]
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Base "Tolerance" RF Model
+```{r Optimize-Threshold-Accuracy-Kappa-Sensitivity-Specificity-Tolerance-RF-Final, include=FALSE}
+# Find the best threshold for the Base Log Regression Model
+
+
+count <- 1
+for(i in thresh_search){
+  if(count == 1){
+    output <- thresh_function(i, base_rf_tolerance_pred_final, final_hold_out_rf$diagnosis)
+  } else {
+    output_temp <- thresh_function(i, base_rf_tolerance_pred_final, final_hold_out_rf$diagnosis)
+    output <- rbind(output, output_temp)
+  }
+  count <- count + 1
+}
+
+row.names(output) <- paste0("Threshold: ", thresh_search)
+
+output <- as.data.frame(output)
+
+# Max Kappa Threshold
+base_rf_tolerance_opt_kappa_thresh_final <- thresh_search[which.max(output$Kappa)]
+
+# Choose Sensitivity Thresh
+lookup <- which(abs(output$Sensitivity-target_rf)==min(abs(output$Sensitivity-target_rf)))[1]
+base_rf_tolerance_opt_sensitivity_thresh_final <- thresh_search[lookup]
+
+# Choose Specificity Thresh
+lookup <- which(abs(output$Specificity-target_rf)==min(abs(output$Specificity-target_rf)))[1]
+base_rf_tolerance_opt_specificity_thresh_final <- thresh_search[lookup]
+
+```
+
+```{r,echo=FALSE, out.width='100%'}
+par(mfrow = c(2,2))
+plot(thresh_search, output$Kappa)
+plot(thresh_search, output$Sensitivity)
+plot(thresh_search, output$Specificity)
+```
+
+### Create Base level Test Predictions Output for the RF Methods
+```{r Final-Level-Decision-Tree-Selector-Train-RF, include=FALSE}
+base_best_rf_best_kappa_pred_value_final  <- ifelse(base_rf_best_pred_final >= base_rf_best_opt_kappa_thresh_final, "M", "B")
+base_best_rf_best_sensitivity_pred_value_final  <- ifelse(base_rf_best_pred_final >= base_rf_best_opt_sensitivity_thresh_final, "M", "B")
+base_best_rf_best_specificity_pred_value_final  <- ifelse(base_rf_best_pred_final >= base_rf_best_opt_specificity_thresh_final, "M", "B")
+base_rf_oneSE_best_kappa_pred_value_final  <- ifelse(base_rf_oneSE_pred_final >= base_rf_oneSE_opt_kappa_thresh, "M", "B")
+base_rf_oneSE_best_sensitivity_pred_value_final  <- ifelse(base_rf_oneSE_pred_final >= base_rf_oneSE_opt_sensitivity_thresh_final, "M", "B")
+base_rf_oneSE_best_specificity_pred_value_final  <- ifelse(base_rf_oneSE_pred_final >= base_rf_oneSE_opt_specificity_thresh_final, "M", "B")
+base_rf_tolerance_best_kappa_pred_value_final  <- ifelse(base_rf_tolerance_pred_final >= base_rf_tolerance_opt_kappa_thresh, "M", "B")
+base_rf_tolerance_best_sensitivity_pred_value_final  <- ifelse(base_rf_tolerance_pred_final >= base_rf_tolerance_opt_sensitivity_thresh_final, "M", "B")
+base_rf_tolerance_best_specificity_pred_value_final  <- ifelse(base_rf_tolerance_pred_final >= base_rf_tolerance_opt_specificity_thresh_final, "M", "B")
+
+decision_tree_ensemble_rf_model_output <- cbind.data.frame(base_best_rf_best_kappa_pred_value_final, base_best_rf_best_sensitivity_pred_value_final, base_best_rf_best_specificity_pred_value_final,
+                                                            base_rf_oneSE_best_kappa_pred_value_final, base_rf_oneSE_best_sensitivity_pred_value_final, base_rf_oneSE_best_specificity_pred_value_final,
+                                                            base_rf_tolerance_best_kappa_pred_value_final, base_rf_tolerance_best_sensitivity_pred_value_final, base_rf_tolerance_best_specificity_pred_value_final,
+                                                            final_hold_out_rf$diagnosis)
+
+names(decision_tree_ensemble_rf_model_output) <- c("Base_Best_RF_Kappa", "Base_Best_RF_Sensitivity", "Base_Best_RF_Specificity", 
+                                                    "Base_oneSE_RF_Kappa", "Base_oneSE_RF_Sensitivity",  "Base_oneSE_RF_Specificity", 
+                                                    "Base_Tolerance_RF_Kappa", "Base_Tolerance_RF_Sensitivity", "Base_Tolerance_RF_Specificity",
+                                                    "Actual")
+
+decision_tree_ensemble_rf_model_output$Base_Best_RF_Kappa <- as.factor(decision_tree_ensemble_rf_model_output$Base_Best_RF_Kappa)
+
+decision_tree_ensemble_rf_model_output$Base_Best_RF_Sensitivity <- as.factor(decision_tree_ensemble_rf_model_output$Base_Best_RF_Sensitivity)
+
+decision_tree_ensemble_rf_model_output$Base_Best_RF_Specificity <- as.factor(decision_tree_ensemble_rf_model_output$Base_Best_RF_Specificity)
+
+decision_tree_ensemble_rf_model_output$Base_oneSE_RF_Kappa <- as.factor(decision_tree_ensemble_rf_model_output$Base_oneSE_RF_Kappa)
+
+decision_tree_ensemble_rf_model_output$Base_oneSE_RF_Sensitivity <- as.factor(decision_tree_ensemble_rf_model_output$Base_oneSE_RF_Sensitivity)
+
+decision_tree_ensemble_rf_model_output$Base_oneSE_RF_Specificity <- as.factor(decision_tree_ensemble_rf_model_output$Base_oneSE_RF_Specificity)
+
+decision_tree_ensemble_rf_model_output$Base_Tolerance_RF_Kappa <- as.factor(decision_tree_ensemble_rf_model_output$Base_Tolerance_RF_Kappa)
+
+decision_tree_ensemble_rf_model_output$Base_Tolerance_RF_Sensitivity <- as.factor(decision_tree_ensemble_rf_model_output$Base_Tolerance_RF_Sensitivity)
+
+decision_tree_ensemble_rf_model_output$Base_Tolerance_RF_Specificity <- as.factor(decision_tree_ensemble_rf_model_output$Base_Tolerance_RF_Specificity)
+
+decision_tree_ensemble_rf_model_output$Actual <- as.factor(decision_tree_ensemble_rf_model_output$Actual)
+```
+
+### RF Output Predictions
+```{r}
+final_rf_models_prediction_best <- predict(base_best_tree_rf_model_selector, decision_tree_ensemble_rf_model_output, type = "raw")
+confusionMatrix(final_rf_models_prediction_best, decision_tree_ensemble_rf_model_output$Actual, positive = "M")
+```
+
+### RF Output Predictions
+```{r}
+final_rf_models_prediction_oneSE <- predict(base_oneSE_tree_rf_model_selector, decision_tree_ensemble_rf_model_output, type = "raw")
+confusionMatrix(final_rf_models_prediction_oneSE, decision_tree_ensemble_rf_model_output$Actual, positive = "M")
+```
+
+### RF Output Predictions
+```{r}
+final_rf_models_prediction_tolerance <- predict(base_tolerance_tree_rf_model_selector, decision_tree_ensemble_rf_model_output, type = "raw")
+confusionMatrix(final_rf_models_prediction_tolerance, decision_tree_ensemble_rf_model_output$Actual, positive = "M")
+```
+
+## Final Prediction Output
+```{r}
+decision_tree_ensemble_of_models <- cbind.data.frame(final_log_models_prediction_best, final_log_models_prediction_oneSE, final_log_models_prediction_tolerance,
+                                                     final_knn_models_prediction_best, final_knn_models_prediction_oneSE, final_knn_models_prediction_tolerance,
+                                                     final_ann_models_prediction_best, final_ann_models_prediction_oneSE, final_ann_models_prediction_tolerance,
+                                                     final_rf_models_prediction_best, final_rf_models_prediction_oneSE, final_rf_models_prediction_tolerance,
+                                                     final_hold_out$diagnosis)
+
+names(decision_tree_ensemble_of_models) <- c("Best_Log", "OneSE_Log", "Tolerance_Log",
+                                             "Best_KNN", "OneSE_KNN", "Tolerance_KNN",
+                                             "Best_ANN", "OneSE_ANN", "Tolerance_ANN",
+                                             "Best_RF", "OneSE_RF", "Tolerance_RF",
+                                             "Actual")
+
+final_output_predictions <- predict(base_oneSE_tree_model_selector, decision_tree_ensemble_of_models, type = "raw")
+confusionMatrix(final_output_predictions, decision_tree_ensemble_of_models$Actual, positive = "M")
+```
